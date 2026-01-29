@@ -22,5 +22,4 @@
 在你的服务器终端执行以下命令即可启动中文交互菜单：
 
 ```bash
-# 请将下面的 URL 替换为你 GitHub 仓库的真实 Raw 地址
-bash <(curl -sL [https://raw.githubusercontent.com/你的用户名/仓库名/main/setup_emby_cn.sh](https://raw.githubusercontent.com/你的用户名/仓库名/main/setup_emby_cn.sh))
+bash <(curl -sL https://raw.githubusercontent.com/NX2406/emby_setup/refs/heads/main/setup_emby_cn.sh)
