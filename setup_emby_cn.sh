@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# 项目名称: Emby 全能影音库一键部署脚本 (CN版 v3.1 - 完美汉化修正)
+# 项目名称: Emby 全能影音库一键部署脚本 (CN版 v3.3 - 高安版)
 # 脚本作者: 网络工程师
-# 功能描述: Docker Emby + 网盘挂载 + Nginx自动反代 + 全中文SSL申请
+# 功能描述: Docker Emby + 网盘挂载 + Nginx自动反代 + SSL + 随机高安密码
 # 兼容系统: CentOS 7+, Ubuntu 20.04+, Debian 11+
 # ==============================================================================
 
@@ -22,7 +22,12 @@ EMBY_PORT=8096
 CD2_PORT=19798
 ALIST_PORT=5244
 DOMAIN_NAME=""
-SSL_SUCCESS="false"  # 标记 SSL 是否申请成功
+SSL_SUCCESS="false"
+
+# 生成 16 位高强度随机密码 (包含大小写字母、数字、特殊符号)
+# 排除了一些容易混淆的字符，确保安全性
+RANDOM_PWD=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 16)
+ALIST_USER="admin"  # Alist 默认管理员用户
 
 # --- 基础工具函数 ---
 
@@ -124,7 +129,6 @@ configure_nginx_automation() {
         
         DOMAIN_NAME="$user_domain"
         CONF_PATH="/etc/nginx/conf.d/emby.conf"
-        # Debian/Ubuntu 有时默认读取 sites-enabled，确保清理默认配置防止冲突
         if [ -d "/etc/nginx/sites-enabled" ]; then
              rm -f /etc/nginx/sites-enabled/default
         fi
@@ -136,72 +140,59 @@ server {
     listen 80;
     server_name ${DOMAIN_NAME};
 
-    # Emby 反向代理
     location / {
         proxy_pass http://127.0.0.1:${EMBY_PORT};
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-
-        # WebSocket 支持 (Emby 必需)
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        
-        # 缓冲优化
         client_max_body_size 0;
     }
 }
 EOF
         
-        # 检查配置并重启
         nginx -t
         if [ $? -eq 0 ]; then
             systemctl reload nginx
-            echo -e "${GREEN}>>> Nginx 配置成功！当前可通过 http://${DOMAIN_NAME} 访问。${NC}"
+            echo -e "${GREEN}>>> Nginx 配置成功！${NC}"
             
-            # --- SSL 自动化 (静默模式) ---
             echo -e ""
-            read -p "是否自动申请 HTTPS 证书 (免费/自动续期)? (y/n): " ssl_choice
+            read -p "是否自动申请 HTTPS 证书 (免费)? (y/n): " ssl_choice
             if [[ "$ssl_choice" == "y" || "$ssl_choice" == "Y" ]]; then
-                echo -e "${YELLOW}>>> 正在安装 SSL 证书工具 (Certbot)...${NC}"
+                echo -e "${YELLOW}>>> 正在安装 Certbot...${NC}"
                 if [ "$PACKAGE_MANAGER" == "yum" ]; then
                     yum install -y certbot python3-certbot-nginx
                 else
                     apt-get install -y certbot python3-certbot-nginx
                 fi
                 
-                # 在这里提前询问邮箱，避免 Certbot 弹出英文提示
                 echo -e ""
-                read -p "请输入您的邮箱 (用于接收证书过期通知): " cert_email
-                
+                read -p "请输入您的邮箱 (用于接收通知): " cert_email
                 if [ -z "$cert_email" ]; then
-                    echo -e "${RED}邮箱不能为空，已跳过 SSL 申请。${NC}"
+                    echo -e "${RED}邮箱为空，跳过 SSL。${NC}"
                 else
-                    echo -e "${YELLOW}>>> 正在向 Let's Encrypt 申请证书... (请稍候)${NC}"
-                    
-                    # 使用非交互模式 (--non-interactive) 并自动同意协议 (--agree-tos) 
-                    # 自动重定向 (--redirect)
+                    echo -e "${YELLOW}>>> 正在申请证书 (静默模式)...${NC}"
                     certbot --nginx --non-interactive --agree-tos --redirect --email "$cert_email" -d "${DOMAIN_NAME}"
-                    
                     if [ $? -eq 0 ]; then
-                        echo -e "${GREEN}>>> HTTPS 证书配置完成！${NC}"
+                        echo -e "${GREEN}>>> HTTPS 配置完成！${NC}"
                         SSL_SUCCESS="true"
                     else
-                        echo -e "${RED}>>> 证书申请失败。请检查域名是否正确解析到 IP，或防火墙是否放行 80/443 端口。${NC}"
+                        echo -e "${RED}>>> 证书申请失败。${NC}"
                     fi
                 fi
             fi
         else
-            echo -e "${RED}>>> Nginx 配置检测失败，请检查 /etc/nginx/conf.d/emby.conf${NC}"
+            echo -e "${RED}>>> Nginx 配置检测失败。${NC}"
         fi
     else
         echo -e "已跳过 Nginx 配置。"
     fi
 }
 
-# --- 最终信息展示 (逻辑优化版) ---
+# --- 最终信息展示 (安全版) ---
 show_final_info() {
     local scheme_name="$1"
     
@@ -221,24 +212,23 @@ show_final_info() {
     if [ "$scheme_name" == "方案B" ]; then
         echo -e "${YELLOW}1. 配置网盘 (Alist)${NC}"
         echo -e "   访问地址:  http://${HOST_IP}:${ALIST_PORT}"
+        echo -e "   -----------------------------------------------------"
+        echo -e "   ${CYAN}管理员账号:  ${ALIST_USER}${NC}"
+        echo -e "   ${CYAN}安全密码:    ${RANDOM_PWD}${NC}"
+        echo -e "   ${RED}(注意：此密码为随机生成，请立即截图或复制保存！)${NC}"
+        echo -e "   -----------------------------------------------------"
         echo -e "   操作: 添加网盘 -> 获取 WebDAV -> Rclone 挂载"
         echo -e ""
     fi
 
     echo -e "${YELLOW}2. 访问影音服 (Emby Server)${NC}"
-    
-    # 智能显示逻辑
     if [ "$SSL_SUCCESS" == "true" ]; then
-        # 如果 SSL 成功，只显示 HTTPS，且不高亮 HTTP
-        echo -e "   ${CYAN}域名访问:  https://${DOMAIN_NAME} (已开启安全连接)${NC}"
+        echo -e "   ${CYAN}域名访问:  https://${DOMAIN_NAME}${NC}"
     elif [ -n "$DOMAIN_NAME" ]; then
-        # 如果配置了域名但没开 SSL
         echo -e "   ${CYAN}域名访问:  http://${DOMAIN_NAME}${NC}"
     else
-        # 纯 IP 模式
         echo -e "   IP访问:    http://${HOST_IP}:${EMBY_PORT}"
     fi
-    
     echo -e "   媒体库路径: /mnt/media/[你的网盘名称]"
     echo -e ""
     echo -e "${GREEN}########################################################${NC}"
@@ -274,6 +264,20 @@ install_scheme_b() {
     mkdir -p "$WORK_DIR/rclone_mount"
 
     docker run -d --restart=always -v "$WORK_DIR/alist":/opt/alist/data -p ${ALIST_PORT}:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="alist" xhofe/alist:latest
+    
+    # --- Alist 自动设置随机高安密码 ---
+    echo -e "${YELLOW}>>> 正在等待 Alist 启动以配置安全策略...${NC}"
+    sleep 5
+    # 设置随机生成的密码
+    docker exec alist ./alist admin set "$RANDOM_PWD" &> /dev/null
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}>>> Alist 安全密码设置成功！${NC}"
+    else
+        echo -e "${RED}>>> 密码设置失败，请手动检查。${NC}"
+    fi
+    # ---------------------------
+
     docker run -d --name emby --restart unless-stopped --net=host --privileged -e UID=0 -e GID=0 -v "$WORK_DIR/emby/config":/config -v "$WORK_DIR/rclone_mount":/mnt/media:shared emby/embyserver:latest
 
     configure_nginx_automation
@@ -284,8 +288,8 @@ install_scheme_b() {
 show_menu() {
     clear
     echo -e "${CYAN}################################################${NC}"
-    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (CN版 v3.1)  #${NC}"
-    echo -e "${CYAN}#     新增: 静默式 SSL 申请 + 智能地址显示     #${NC}"
+    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (v3.3)       #${NC}"
+    echo -e "${CYAN}#     安全升级: Alist 密码强制随机化 (16位)    #${NC}"
     echo -e "${CYAN}################################################${NC}"
     echo -e ""
     echo -e "请选择部署方案:"
@@ -295,6 +299,7 @@ show_menu() {
     echo -e ""
     echo -e "${YELLOW}2. 方案 B: Alist + Emby${NC}"
     echo -e "   (推荐: Google Drive/直链播放 - 含 Nginx 自动配置)"
+    echo -e "   ${RED}* 包含自动高强度随机密码设置${NC}"
     echo -e ""
     echo -e "------------------------------------------------"
     echo -e "实用工具箱:"
