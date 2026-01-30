@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# 项目名称: Emby 全能影音库一键部署脚本 (CN版 v3.0 - 自动化 Nginx 版)
+# 项目名称: Emby 全能影音库一键部署脚本 (CN版 v3.1 - 完美汉化修正)
 # 脚本作者: 网络工程师
-# 功能描述: Docker 部署 Emby + 网盘挂载 + Nginx 反代自动配置 + SSL
+# 功能描述: Docker Emby + 网盘挂载 + Nginx自动反代 + 全中文SSL申请
 # 兼容系统: CentOS 7+, Ubuntu 20.04+, Debian 11+
 # ==============================================================================
 
@@ -22,6 +22,7 @@ EMBY_PORT=8096
 CD2_PORT=19798
 ALIST_PORT=5244
 DOMAIN_NAME=""
+SSL_SUCCESS="false"  # 标记 SSL 是否申请成功
 
 # --- 基础工具函数 ---
 
@@ -83,7 +84,7 @@ install_rclone() {
     fi
 }
 
-# --- Nginx 自动化配置模块 (核心升级) ---
+# --- Nginx 自动化配置模块 ---
 
 install_nginx() {
     if ! command -v nginx &> /dev/null; then
@@ -123,9 +124,8 @@ configure_nginx_automation() {
         
         DOMAIN_NAME="$user_domain"
         CONF_PATH="/etc/nginx/conf.d/emby.conf"
-        # Debian/Ubuntu 有时默认读取 sites-enabled，确保 conf.d 被包含或使用 sites-available
+        # Debian/Ubuntu 有时默认读取 sites-enabled，确保清理默认配置防止冲突
         if [ -d "/etc/nginx/sites-enabled" ]; then
-             # 如果是 Debian 系，清理默认配置防止 80 端口冲突
              rm -f /etc/nginx/sites-enabled/default
         fi
 
@@ -159,23 +159,39 @@ EOF
         nginx -t
         if [ $? -eq 0 ]; then
             systemctl reload nginx
-            echo -e "${GREEN}>>> Nginx 配置成功！可以通过 http://${DOMAIN_NAME} 访问了。${NC}"
+            echo -e "${GREEN}>>> Nginx 配置成功！当前可通过 http://${DOMAIN_NAME} 访问。${NC}"
             
-            # --- SSL 自动化 (Certbot) ---
+            # --- SSL 自动化 (静默模式) ---
             echo -e ""
-            read -p "是否自动申请 HTTPS 证书 (使用 Let's Encrypt)? (y/n): " ssl_choice
+            read -p "是否自动申请 HTTPS 证书 (免费/自动续期)? (y/n): " ssl_choice
             if [[ "$ssl_choice" == "y" || "$ssl_choice" == "Y" ]]; then
-                echo -e "${YELLOW}>>> 正在安装 Certbot...${NC}"
+                echo -e "${YELLOW}>>> 正在安装 SSL 证书工具 (Certbot)...${NC}"
                 if [ "$PACKAGE_MANAGER" == "yum" ]; then
                     yum install -y certbot python3-certbot-nginx
                 else
                     apt-get install -y certbot python3-certbot-nginx
                 fi
                 
-                echo -e "${YELLOW}>>> 开始申请证书... (请按提示输入邮箱)${NC}"
-                certbot --nginx -d "${DOMAIN_NAME}"
+                # 在这里提前询问邮箱，避免 Certbot 弹出英文提示
+                echo -e ""
+                read -p "请输入您的邮箱 (用于接收证书过期通知): " cert_email
                 
-                echo -e "${GREEN}>>> HTTPS 配置完成！${NC}"
+                if [ -z "$cert_email" ]; then
+                    echo -e "${RED}邮箱不能为空，已跳过 SSL 申请。${NC}"
+                else
+                    echo -e "${YELLOW}>>> 正在向 Let's Encrypt 申请证书... (请稍候)${NC}"
+                    
+                    # 使用非交互模式 (--non-interactive) 并自动同意协议 (--agree-tos) 
+                    # 自动重定向 (--redirect)
+                    certbot --nginx --non-interactive --agree-tos --redirect --email "$cert_email" -d "${DOMAIN_NAME}"
+                    
+                    if [ $? -eq 0 ]; then
+                        echo -e "${GREEN}>>> HTTPS 证书配置完成！${NC}"
+                        SSL_SUCCESS="true"
+                    else
+                        echo -e "${RED}>>> 证书申请失败。请检查域名是否正确解析到 IP，或防火墙是否放行 80/443 端口。${NC}"
+                    fi
+                fi
             fi
         else
             echo -e "${RED}>>> Nginx 配置检测失败，请检查 /etc/nginx/conf.d/emby.conf${NC}"
@@ -185,7 +201,7 @@ EOF
     fi
 }
 
-# --- 最终信息展示 ---
+# --- 最终信息展示 (逻辑优化版) ---
 show_final_info() {
     local scheme_name="$1"
     
@@ -210,11 +226,19 @@ show_final_info() {
     fi
 
     echo -e "${YELLOW}2. 访问影音服 (Emby Server)${NC}"
-    if [ -n "$DOMAIN_NAME" ]; then
-        echo -e "   ${CYAN}域名访问:  https://${DOMAIN_NAME} (或 http)${NC}"
+    
+    # 智能显示逻辑
+    if [ "$SSL_SUCCESS" == "true" ]; then
+        # 如果 SSL 成功，只显示 HTTPS，且不高亮 HTTP
+        echo -e "   ${CYAN}域名访问:  https://${DOMAIN_NAME} (已开启安全连接)${NC}"
+    elif [ -n "$DOMAIN_NAME" ]; then
+        # 如果配置了域名但没开 SSL
+        echo -e "   ${CYAN}域名访问:  http://${DOMAIN_NAME}${NC}"
     else
+        # 纯 IP 模式
         echo -e "   IP访问:    http://${HOST_IP}:${EMBY_PORT}"
     fi
+    
     echo -e "   媒体库路径: /mnt/media/[你的网盘名称]"
     echo -e ""
     echo -e "${GREEN}########################################################${NC}"
@@ -260,8 +284,8 @@ install_scheme_b() {
 show_menu() {
     clear
     echo -e "${CYAN}################################################${NC}"
-    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (CN版 v3.0)  #${NC}"
-    echo -e "${CYAN}#     新增: 自动化 Nginx 反代 + SSL 证书配置   #${NC}"
+    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (CN版 v3.1)  #${NC}"
+    echo -e "${CYAN}#     新增: 静默式 SSL 申请 + 智能地址显示     #${NC}"
     echo -e "${CYAN}################################################${NC}"
     echo -e ""
     echo -e "请选择部署方案:"
@@ -289,7 +313,6 @@ show_menu() {
         5)
             echo -e "${RED}正在清理...${NC}"
             docker rm -f clouddrive2 alist emby &> /dev/null
-            # 停止 nginx 以防万一
             systemctl stop nginx &> /dev/null
             read -p "删除配置文件? (y/n): " del_conf
             if [ "$del_conf" == "y" ]; then rm -rf "$WORK_DIR"; fi
