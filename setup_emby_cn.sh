@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# 项目名称: Emby 全能影音库一键部署脚本 (CN版 v3.5 - 全自动挂载版)
-# 脚本作者: 网络工程师
-# 功能描述: Docker Emby + 网盘挂载 + Nginx + SSL + 自动Rclone配置与挂载
+# 项目名称: Emby 全能影音库一键部署脚本 (CN版 v3.6 - HTTPS显示修复版)
+# Prowered By: zbsh
+# 功能描述: Docker Emby + 网盘挂载 + Nginx + SSL + 自动Rclone + 修正显示逻辑
 # 兼容系统: CentOS 7+, Ubuntu 20.04+, Debian 11+
 # ==============================================================================
 
@@ -24,7 +24,7 @@ ALIST_PORT=5244
 DOMAIN_NAME=""
 SSL_SUCCESS="false"
 
-# 生成 16 位高强度随机密码 (排除特殊字符以免破坏 Rclone 命令格式，仅留字母数字，安全性足够)
+# 生成 16 位高强度随机密码
 RANDOM_PWD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
 ALIST_USER="admin"
 
@@ -158,7 +158,7 @@ EOF
             echo -e "${GREEN}>>> Nginx 配置成功！${NC}"
             
             echo -e ""
-            read -p "是否自动申请 HTTPS 证书 (免费)? (y/n): " ssl_choice
+            read -p "是否自动申请 HTTPS 证书? (y/n): " ssl_choice
             if [[ "$ssl_choice" == "y" || "$ssl_choice" == "Y" ]]; then
                 echo -e "${YELLOW}>>> 正在安装 Certbot...${NC}"
                 if [ "$PACKAGE_MANAGER" == "yum" ]; then
@@ -172,13 +172,15 @@ EOF
                 if [ -z "$cert_email" ]; then
                     echo -e "${RED}邮箱为空，跳过 SSL。${NC}"
                 else
-                    echo -e "${YELLOW}>>> 正在申请证书 (静默模式)...${NC}"
+                    echo -e "${YELLOW}>>> 正在申请证书(QAQ)~...${NC}"
                     certbot --nginx --non-interactive --agree-tos --redirect --email "$cert_email" -d "${DOMAIN_NAME}"
-                    if [ $? -eq 0 ]; then
+                    
+                    # --- 修复逻辑：直接检查证书文件是否存在 ---
+                    if [ -d "/etc/letsencrypt/live/${DOMAIN_NAME}" ] || [ -f "/etc/letsencrypt/live/${DOMAIN_NAME}/fullchain.pem" ]; then
                         echo -e "${GREEN}>>> HTTPS 配置完成！${NC}"
                         SSL_SUCCESS="true"
                     else
-                        echo -e "${RED}>>> 证书申请失败。${NC}"
+                        echo -e "${RED}>>> 证书申请可能失败，未检测到证书文件。${NC}"
                     fi
                 fi
             fi
@@ -221,13 +223,17 @@ show_final_info() {
     fi
 
     echo -e "${YELLOW}2. 访问影音服 (Emby Server)${NC}"
+    
+    # --- 修复逻辑：强制判断 SSL 状态 ---
     if [ "$SSL_SUCCESS" == "true" ]; then
         echo -e "   ${CYAN}域名访问:  https://${DOMAIN_NAME}${NC}"
     elif [ -n "$DOMAIN_NAME" ]; then
+        # 如果有域名但 SSL 没检测到，提示 HTTP
         echo -e "   ${CYAN}域名访问:  http://${DOMAIN_NAME}${NC}"
     else
         echo -e "   IP访问:    http://${HOST_IP}:${EMBY_PORT}"
     fi
+    
     echo -e "   媒体库路径: /mnt/media/[你的网盘名称]"
     echo -e ""
     echo -e "${GREEN}########################################################${NC}"
@@ -283,7 +289,6 @@ install_scheme_b() {
     sleep 5
     
     # 使用 rclone config create 非交互式创建配置
-    # 注意：这里我们使用本地环回地址连接 Alist，速度最快
     rclone config create alist webdav url="http://127.0.0.1:5244/dav" vendor="other" user="admin" pass="$RANDOM_PWD" --non-interactive
     
     echo -e "${YELLOW}>>> 正在挂载 Alist 到本地...${NC}"
@@ -301,8 +306,8 @@ install_scheme_b() {
 show_menu() {
     clear
     echo -e "${CYAN}################################################${NC}"
-    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (v3.5)       #${NC}"
-    echo -e "${CYAN}#     新增: Rclone 全自动配置与挂载 (零手动)   #${NC}"
+    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (v3.6)       #${NC}"
+    echo -e "${CYAN}#     修复: 强制检测证书，修正 HTTPS 显示      #${NC}"
     echo -e "${CYAN}################################################${NC}"
     echo -e ""
     echo -e "请选择部署方案:"
@@ -332,7 +337,6 @@ show_menu() {
             echo -e "${RED}正在清理...${NC}"
             docker rm -f clouddrive2 alist emby &> /dev/null
             systemctl stop nginx &> /dev/null
-            # 尝试卸载挂载点
             umount /opt/media_stack/rclone_mount 2>/dev/null
             read -p "删除配置文件? (y/n): " del_conf
             if [ "$del_conf" == "y" ]; then rm -rf "$WORK_DIR"; fi
