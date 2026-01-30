@@ -1,11 +1,5 @@
 #!/bin/bash
 
-# ==============================================================================
-# 项目名称: Emby 全能影音库一键部署脚本 (CN版 v3.3 - 高安版)
-# 脚本作者: 网络工程师
-# 功能描述: Docker Emby + 网盘挂载 + Nginx自动反代 + SSL + 随机高安密码
-# 兼容系统: CentOS 7+, Ubuntu 20.04+, Debian 11+
-# ==============================================================================
 
 # --- 颜色定义 ---
 RED='\033[0;31m'
@@ -24,10 +18,9 @@ ALIST_PORT=5244
 DOMAIN_NAME=""
 SSL_SUCCESS="false"
 
-# 生成 16 位高强度随机密码 (包含大小写字母、数字、特殊符号)
-# 排除了一些容易混淆的字符，确保安全性
+# 生成 16 位高强度随机密码
 RANDOM_PWD=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 16)
-ALIST_USER="admin"  # Alist 默认管理员用户
+ALIST_USER="admin"
 
 # --- 基础工具函数 ---
 
@@ -76,6 +69,7 @@ fix_tmdb_hosts() {
     echo "18.160.41.69 api.themoviedb.org" >> /etc/hosts
     echo "13.224.161.90 image.tmdb.org" >> /etc/hosts
     echo -e "${GREEN}>>> Hosts 优化完成${NC}"
+    # 如果 Emby 已运行则重启，未运行则跳过
     if docker ps | grep -q emby; then docker restart emby > /dev/null; fi
 }
 
@@ -160,7 +154,7 @@ EOF
             echo -e "${GREEN}>>> Nginx 配置成功！${NC}"
             
             echo -e ""
-            read -p "是否自动申请 HTTPS 证书 (免费)? (y/n): " ssl_choice
+            read -p "是否自动申请 HTTPS 证书? (y/n): " ssl_choice
             if [[ "$ssl_choice" == "y" || "$ssl_choice" == "Y" ]]; then
                 echo -e "${YELLOW}>>> 正在安装 Certbot...${NC}"
                 if [ "$PACKAGE_MANAGER" == "yum" ]; then
@@ -174,7 +168,7 @@ EOF
                 if [ -z "$cert_email" ]; then
                     echo -e "${RED}邮箱为空，跳过 SSL。${NC}"
                 else
-                    echo -e "${YELLOW}>>> 正在申请证书 (静默模式)...${NC}"
+                    echo -e "${YELLOW}>>> 正在申请证书 ...${NC}"
                     certbot --nginx --non-interactive --agree-tos --redirect --email "$cert_email" -d "${DOMAIN_NAME}"
                     if [ $? -eq 0 ]; then
                         echo -e "${GREEN}>>> HTTPS 配置完成！${NC}"
@@ -192,7 +186,7 @@ EOF
     fi
 }
 
-# --- 最终信息展示 (安全版) ---
+# --- 最终信息展示 (压轴出场) ---
 show_final_info() {
     local scheme_name="$1"
     
@@ -239,6 +233,7 @@ install_scheme_a() {
     echo -e "${BLUE}>>> 正在部署方案 A...${NC}"
     install_base_dependencies
     install_docker
+    fix_tmdb_hosts  # [调整] 提前执行 Hosts 修复
 
     docker rm -f clouddrive2 emby &> /dev/null
     mkdir -p "$WORK_DIR/clouddrive2/config"
@@ -249,6 +244,7 @@ install_scheme_a() {
     docker run -d --name emby --restart unless-stopped --net=host --privileged -e UID=0 -e GID=0 -v "$WORK_DIR/emby/config":/config -v "$WORK_DIR/clouddrive2/mount":/mnt/media:shared emby/embyserver:latest
 
     configure_nginx_automation
+    # [关键] 必须最后调用，防止被刷屏
     show_final_info "方案A"
 }
 
@@ -257,6 +253,8 @@ install_scheme_b() {
     echo -e "${BLUE}>>> 正在部署方案 B...${NC}"
     install_base_dependencies
     install_docker
+    install_rclone  # [调整] 提前安装 Rclone，防止日志遮挡
+    fix_tmdb_hosts  # [调整] 提前执行 Hosts 修复
 
     docker rm -f alist emby &> /dev/null
     mkdir -p "$WORK_DIR/alist"
@@ -265,22 +263,14 @@ install_scheme_b() {
 
     docker run -d --restart=always -v "$WORK_DIR/alist":/opt/alist/data -p ${ALIST_PORT}:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="alist" xhofe/alist:latest
     
-    # --- Alist 自动设置随机高安密码 ---
-    echo -e "${YELLOW}>>> 正在等待 Alist 启动以配置安全策略...${NC}"
+    echo -e "${YELLOW}>>> 正在配置 Alist 安全策略...${NC}"
     sleep 5
-    # 设置随机生成的密码
     docker exec alist ./alist admin set "$RANDOM_PWD" &> /dev/null
     
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}>>> Alist 安全密码设置成功！${NC}"
-    else
-        echo -e "${RED}>>> 密码设置失败，请手动检查。${NC}"
-    fi
-    # ---------------------------
-
     docker run -d --name emby --restart unless-stopped --net=host --privileged -e UID=0 -e GID=0 -v "$WORK_DIR/emby/config":/config -v "$WORK_DIR/rclone_mount":/mnt/media:shared emby/embyserver:latest
 
     configure_nginx_automation
+    # [关键] 必须最后调用，防止被刷屏
     show_final_info "方案B"
 }
 
@@ -288,8 +278,8 @@ install_scheme_b() {
 show_menu() {
     clear
     echo -e "${CYAN}################################################${NC}"
-    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (v3.3)       #${NC}"
-    echo -e "${CYAN}#     安全升级: Alist 密码强制随机化 (16位)    #${NC}"
+    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (v3.4)       #${NC}"
+    echo -e "${CYAN}#     修复: 修正安装顺序，防止日志刷屏         #${NC}"
     echo -e "${CYAN}################################################${NC}"
     echo -e ""
     echo -e "请选择部署方案:"
@@ -311,8 +301,8 @@ show_menu() {
     read -p "请输入数字 [0-5]: " choice
 
     case $choice in
-        1) check_root; install_scheme_a; fix_tmdb_hosts ;;
-        2) check_root; install_scheme_b; fix_tmdb_hosts; install_rclone ;;
+        1) check_root; install_scheme_a ;; # 移除单独调用，已集成到函数内
+        2) check_root; install_scheme_b ;; # 移除单独调用，已集成到函数内
         3) check_root; fix_tmdb_hosts ;;
         4) check_root; install_base_dependencies; configure_nginx_automation ;;
         5)
