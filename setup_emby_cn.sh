@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# ==============================================================================
+# 项目名称: Emby 全能影音库一键部署脚本 (CN版 v3.5 - 全自动挂载版)
+# 脚本作者: 网络工程师
+# 功能描述: Docker Emby + 网盘挂载 + Nginx + SSL + 自动Rclone配置与挂载
+# 兼容系统: CentOS 7+, Ubuntu 20.04+, Debian 11+
+# ==============================================================================
 
 # --- 颜色定义 ---
 RED='\033[0;31m'
@@ -18,8 +24,8 @@ ALIST_PORT=5244
 DOMAIN_NAME=""
 SSL_SUCCESS="false"
 
-# 生成 16 位高强度随机密码
-RANDOM_PWD=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 16)
+# 生成 16 位高强度随机密码 (排除特殊字符以免破坏 Rclone 命令格式，仅留字母数字，安全性足够)
+RANDOM_PWD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
 ALIST_USER="admin"
 
 # --- 基础工具函数 ---
@@ -37,12 +43,12 @@ install_base_dependencies() {
         echo -e "${YELLOW}>>> 检测到 CentOS/RHEL 系统，正在安装基础依赖...${NC}"
         yum install -y epel-release
         yum update -y
-        yum install -y curl wget tar net-tools
+        yum install -y curl wget tar net-tools fuse
     elif [ -f /etc/debian_version ]; then
         PACKAGE_MANAGER="apt"
         echo -e "${YELLOW}>>> 检测到 Debian/Ubuntu 系统，正在安装基础依赖...${NC}"
         apt-get update
-        apt-get install -y curl wget tar net-tools
+        apt-get install -y curl wget tar net-tools fuse
     else
         echo -e "${RED}[错误] 不支持的操作系统。${NC}"
         exit 1
@@ -69,8 +75,6 @@ fix_tmdb_hosts() {
     echo "18.160.41.69 api.themoviedb.org" >> /etc/hosts
     echo "13.224.161.90 image.tmdb.org" >> /etc/hosts
     echo -e "${GREEN}>>> Hosts 优化完成${NC}"
-    # 如果 Emby 已运行则重启，未运行则跳过
-    if docker ps | grep -q emby; then docker restart emby > /dev/null; fi
 }
 
 install_rclone() {
@@ -154,7 +158,7 @@ EOF
             echo -e "${GREEN}>>> Nginx 配置成功！${NC}"
             
             echo -e ""
-            read -p "是否自动申请 HTTPS 证书? (y/n): " ssl_choice
+            read -p "是否自动申请 HTTPS 证书 (免费)? (y/n): " ssl_choice
             if [[ "$ssl_choice" == "y" || "$ssl_choice" == "Y" ]]; then
                 echo -e "${YELLOW}>>> 正在安装 Certbot...${NC}"
                 if [ "$PACKAGE_MANAGER" == "yum" ]; then
@@ -168,7 +172,7 @@ EOF
                 if [ -z "$cert_email" ]; then
                     echo -e "${RED}邮箱为空，跳过 SSL。${NC}"
                 else
-                    echo -e "${YELLOW}>>> 正在申请证书 ...${NC}"
+                    echo -e "${YELLOW}>>> 正在申请证书 (静默模式)...${NC}"
                     certbot --nginx --non-interactive --agree-tos --redirect --email "$cert_email" -d "${DOMAIN_NAME}"
                     if [ $? -eq 0 ]; then
                         echo -e "${GREEN}>>> HTTPS 配置完成！${NC}"
@@ -186,7 +190,7 @@ EOF
     fi
 }
 
-# --- 最终信息展示 (压轴出场) ---
+# --- 最终信息展示 ---
 show_final_info() {
     local scheme_name="$1"
     
@@ -209,9 +213,10 @@ show_final_info() {
         echo -e "   -----------------------------------------------------"
         echo -e "   ${CYAN}管理员账号:  ${ALIST_USER}${NC}"
         echo -e "   ${CYAN}安全密码:    ${RANDOM_PWD}${NC}"
-        echo -e "   ${RED}(注意：此密码为随机生成，请立即截图或复制保存！)${NC}"
+        echo -e "   ${RED}(请立即截图保存！)${NC}"
         echo -e "   -----------------------------------------------------"
-        echo -e "   操作: 添加网盘 -> 获取 WebDAV -> Rclone 挂载"
+        echo -e "   ${GREEN}>>> 脚本已自动为您配置好 Rclone 挂载！${NC}"
+        echo -e "   ${GREEN}>>> 您只需去 Alist 添加网盘，Emby 即可看到文件。${NC}"
         echo -e ""
     fi
 
@@ -233,7 +238,7 @@ install_scheme_a() {
     echo -e "${BLUE}>>> 正在部署方案 A...${NC}"
     install_base_dependencies
     install_docker
-    fix_tmdb_hosts  # [调整] 提前执行 Hosts 修复
+    fix_tmdb_hosts
 
     docker rm -f clouddrive2 emby &> /dev/null
     mkdir -p "$WORK_DIR/clouddrive2/config"
@@ -244,7 +249,6 @@ install_scheme_a() {
     docker run -d --name emby --restart unless-stopped --net=host --privileged -e UID=0 -e GID=0 -v "$WORK_DIR/emby/config":/config -v "$WORK_DIR/clouddrive2/mount":/mnt/media:shared emby/embyserver:latest
 
     configure_nginx_automation
-    # [关键] 必须最后调用，防止被刷屏
     show_final_info "方案A"
 }
 
@@ -253,24 +257,43 @@ install_scheme_b() {
     echo -e "${BLUE}>>> 正在部署方案 B...${NC}"
     install_base_dependencies
     install_docker
-    install_rclone  # [调整] 提前安装 Rclone，防止日志遮挡
-    fix_tmdb_hosts  # [调整] 提前执行 Hosts 修复
+    install_rclone
+    fix_tmdb_hosts
 
+    # 1. 清理环境
     docker rm -f alist emby &> /dev/null
+    # 强制卸载挂载点以防残留
+    umount /opt/media_stack/rclone_mount 2>/dev/null
+    
     mkdir -p "$WORK_DIR/alist"
     mkdir -p "$WORK_DIR/emby/config"
     mkdir -p "$WORK_DIR/rclone_mount"
 
+    # 2. 启动 Alist
     docker run -d --restart=always -v "$WORK_DIR/alist":/opt/alist/data -p ${ALIST_PORT}:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="alist" xhofe/alist:latest
     
+    # 3. 自动配置 Alist 密码
     echo -e "${YELLOW}>>> 正在配置 Alist 安全策略...${NC}"
-    sleep 5
+    sleep 5 # 等待容器启动
     docker exec alist ./alist admin set "$RANDOM_PWD" &> /dev/null
     
+    # 4. [新功能] 自动配置 Rclone 连接并挂载
+    echo -e "${YELLOW}>>> 正在自动配置 Rclone 连接...${NC}"
+    # 等待 Alist 端口完全就绪
+    sleep 5
+    
+    # 使用 rclone config create 非交互式创建配置
+    # 注意：这里我们使用本地环回地址连接 Alist，速度最快
+    rclone config create alist webdav url="http://127.0.0.1:5244/dav" vendor="other" user="admin" pass="$RANDOM_PWD" --non-interactive
+    
+    echo -e "${YELLOW}>>> 正在挂载 Alist 到本地...${NC}"
+    # 后台挂载
+    rclone mount alist:/ /opt/media_stack/rclone_mount --copy-links --allow-other --allow-non-empty --vfs-cache-mode writes --daemon
+    
+    # 5. 启动 Emby
     docker run -d --name emby --restart unless-stopped --net=host --privileged -e UID=0 -e GID=0 -v "$WORK_DIR/emby/config":/config -v "$WORK_DIR/rclone_mount":/mnt/media:shared emby/embyserver:latest
 
     configure_nginx_automation
-    # [关键] 必须最后调用，防止被刷屏
     show_final_info "方案B"
 }
 
@@ -278,8 +301,8 @@ install_scheme_b() {
 show_menu() {
     clear
     echo -e "${CYAN}################################################${NC}"
-    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (v3.4)       #${NC}"
-    echo -e "${CYAN}#     修复: 修正安装顺序，防止日志刷屏         #${NC}"
+    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (v3.5)       #${NC}"
+    echo -e "${CYAN}#     新增: Rclone 全自动配置与挂载 (零手动)   #${NC}"
     echo -e "${CYAN}################################################${NC}"
     echo -e ""
     echo -e "请选择部署方案:"
@@ -289,7 +312,7 @@ show_menu() {
     echo -e ""
     echo -e "${YELLOW}2. 方案 B: Alist + Emby${NC}"
     echo -e "   (推荐: Google Drive/直链播放 - 含 Nginx 自动配置)"
-    echo -e "   ${RED}* 包含自动高强度随机密码设置${NC}"
+    echo -e "   ${RED}* 包含自动高强密码 + 自动挂载，无需手动配置 Rclone${NC}"
     echo -e ""
     echo -e "------------------------------------------------"
     echo -e "实用工具箱:"
@@ -301,14 +324,16 @@ show_menu() {
     read -p "请输入数字 [0-5]: " choice
 
     case $choice in
-        1) check_root; install_scheme_a ;; # 移除单独调用，已集成到函数内
-        2) check_root; install_scheme_b ;; # 移除单独调用，已集成到函数内
+        1) check_root; install_scheme_a ;;
+        2) check_root; install_scheme_b ;;
         3) check_root; fix_tmdb_hosts ;;
         4) check_root; install_base_dependencies; configure_nginx_automation ;;
         5)
             echo -e "${RED}正在清理...${NC}"
             docker rm -f clouddrive2 alist emby &> /dev/null
             systemctl stop nginx &> /dev/null
+            # 尝试卸载挂载点
+            umount /opt/media_stack/rclone_mount 2>/dev/null
             read -p "删除配置文件? (y/n): " del_conf
             if [ "$del_conf" == "y" ]; then rm -rf "$WORK_DIR"; fi
             echo "完成。"
