@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# 项目名称: Emby 全能影音库一键部署脚本 (中文通用版 v2.0)
+# 项目名称: Emby 全能影音库一键部署脚本 (CN版 v3.0 - 自动化 Nginx 版)
 # 脚本作者: 网络工程师
-# 功能描述: Docker 部署 Emby + 网盘挂载 + 域名绑定助手
+# 功能描述: Docker 部署 Emby + 网盘挂载 + Nginx 反代自动配置 + SSL
 # 兼容系统: CentOS 7+, Ubuntu 20.04+, Debian 11+
 # ==============================================================================
 
@@ -23,7 +23,7 @@ CD2_PORT=19798
 ALIST_PORT=5244
 DOMAIN_NAME=""
 
-# --- 工具函数 ---
+# --- 基础工具函数 ---
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -36,13 +36,14 @@ install_base_dependencies() {
     if [ -f /etc/redhat-release ]; then
         PACKAGE_MANAGER="yum"
         echo -e "${YELLOW}>>> 检测到 CentOS/RHEL 系统，正在安装基础依赖...${NC}"
+        yum install -y epel-release
         yum update -y
-        yum install -y curl wget tar
+        yum install -y curl wget tar net-tools
     elif [ -f /etc/debian_version ]; then
         PACKAGE_MANAGER="apt"
         echo -e "${YELLOW}>>> 检测到 Debian/Ubuntu 系统，正在安装基础依赖...${NC}"
         apt-get update
-        apt-get install -y curl wget tar
+        apt-get install -y curl wget tar net-tools
     else
         echo -e "${RED}[错误] 不支持的操作系统。${NC}"
         exit 1
@@ -82,59 +83,109 @@ install_rclone() {
     fi
 }
 
-# --- 域名绑定助手 (新增功能) ---
-ask_domain_binding() {
-    echo -e ""
-    echo -e "${CYAN}================================================${NC}"
-    echo -e "${CYAN}       🌐 域名绑定助手 (可选步骤)       ${NC}"
-    echo -e "${CYAN}================================================${NC}"
-    echo -e "您是否拥有一个域名，并希望通过域名访问 Emby？"
-    echo -e "例如: http://emby.yourdomain.com -> 访问本机的 8096 端口"
-    echo -e "${YELLOW}注意: 您需要先在域名服务商处将域名 A 记录解析到本服务器 IP: ${HOST_IP}${NC}"
-    echo -e "------------------------------------------------"
-    
-    read -p "是否需要绑定域名？(y/n): " bind_choice
-    
-    if [[ "$bind_choice" == "y" || "$bind_choice" == "Y" ]]; then
-        read -p "请输入您的域名 (例如 emby.test.com): " user_domain
-        if [ -z "$user_domain" ]; then
-            echo -e "${RED}域名不能为空，跳过绑定。${NC}"
-            DOMAIN_NAME=""
+# --- Nginx 自动化配置模块 (核心升级) ---
+
+install_nginx() {
+    if ! command -v nginx &> /dev/null; then
+        echo -e "${YELLOW}>>> 正在安装 Nginx...${NC}"
+        if [ "$PACKAGE_MANAGER" == "yum" ]; then
+            yum install -y nginx
         else
-            DOMAIN_NAME="$user_domain"
-            echo -e "${GREEN}>>> 已记录域名: ${DOMAIN_NAME}${NC}"
-            
-            # 生成 Nginx 配置模板
-            echo -e "${YELLOW}>>> 正在为您生成 Nginx 反向代理配置建议...${NC}"
-            echo -e ""
-            echo -e "${BLUE}--- Nginx 配置文件参考 (emby.conf) ---${NC}"
-            echo "server {"
-            echo "    listen 80;"
-            echo "    server_name ${DOMAIN_NAME};"
-            echo "    location / {"
-            echo "        proxy_pass http://127.0.0.1:${EMBY_PORT};"
-            echo "        proxy_set_header Host \$host;"
-            echo "        proxy_set_header X-Real-IP \$remote_addr;"
-            echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
-            echo "        # WebSocket 支持 (Emby 必需)"
-            echo "        proxy_http_version 1.1;"
-            echo "        proxy_set_header Upgrade \$http_upgrade;"
-            echo "        proxy_set_header Connection \"upgrade\";"
-            echo "    }"
-            echo "}"
-            echo -e "${BLUE}--------------------------------------${NC}"
-            echo -e "提示: 请将上述内容添加到您的 Nginx 配置文件中并重载 Nginx。"
-            echo -e "如果您使用的是 Nginx Proxy Manager，请直接在后台添加 Proxy Host。"
-            echo -e ""
-            read -p "按回车键继续..."
+            apt-get install -y nginx
         fi
+        systemctl enable nginx
+        systemctl start nginx
+        echo -e "${GREEN}>>> Nginx 安装完成${NC}"
     else
-        echo -e "已跳过域名绑定。"
-        DOMAIN_NAME=""
+        echo -e "${GREEN}>>> Nginx 已安装${NC}"
     fi
 }
 
-# --- 最终信息展示 (优化版) ---
+configure_nginx_automation() {
+    echo -e ""
+    echo -e "${CYAN}================================================${NC}"
+    echo -e "${CYAN}       🌐 Nginx 域名自动配置助手       ${NC}"
+    echo -e "${CYAN}================================================${NC}"
+    echo -e "本功能将自动安装 Nginx 并配置反向代理。"
+    echo -e "前提条件: 您已将域名解析到本服务器 IP: ${HOST_IP}"
+    echo -e "------------------------------------------------"
+    
+    read -p "是否启用 Nginx 自动配置？(y/n): " nginx_choice
+    
+    if [[ "$nginx_choice" == "y" || "$nginx_choice" == "Y" ]]; then
+        install_nginx
+        
+        read -p "请输入您的域名 (例如 emby.test.com): " user_domain
+        if [ -z "$user_domain" ]; then
+            echo -e "${RED}域名不能为空，跳过配置。${NC}"
+            return
+        fi
+        
+        DOMAIN_NAME="$user_domain"
+        CONF_PATH="/etc/nginx/conf.d/emby.conf"
+        # Debian/Ubuntu 有时默认读取 sites-enabled，确保 conf.d 被包含或使用 sites-available
+        if [ -d "/etc/nginx/sites-enabled" ]; then
+             # 如果是 Debian 系，清理默认配置防止 80 端口冲突
+             rm -f /etc/nginx/sites-enabled/default
+        fi
+
+        echo -e "${YELLOW}>>> 正在写入 Nginx 配置...${NC}"
+        
+        cat > "$CONF_PATH" <<EOF
+server {
+    listen 80;
+    server_name ${DOMAIN_NAME};
+
+    # Emby 反向代理
+    location / {
+        proxy_pass http://127.0.0.1:${EMBY_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        # WebSocket 支持 (Emby 必需)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # 缓冲优化
+        client_max_body_size 0;
+    }
+}
+EOF
+        
+        # 检查配置并重启
+        nginx -t
+        if [ $? -eq 0 ]; then
+            systemctl reload nginx
+            echo -e "${GREEN}>>> Nginx 配置成功！可以通过 http://${DOMAIN_NAME} 访问了。${NC}"
+            
+            # --- SSL 自动化 (Certbot) ---
+            echo -e ""
+            read -p "是否自动申请 HTTPS 证书 (使用 Let's Encrypt)? (y/n): " ssl_choice
+            if [[ "$ssl_choice" == "y" || "$ssl_choice" == "Y" ]]; then
+                echo -e "${YELLOW}>>> 正在安装 Certbot...${NC}"
+                if [ "$PACKAGE_MANAGER" == "yum" ]; then
+                    yum install -y certbot python3-certbot-nginx
+                else
+                    apt-get install -y certbot python3-certbot-nginx
+                fi
+                
+                echo -e "${YELLOW}>>> 开始申请证书... (请按提示输入邮箱)${NC}"
+                certbot --nginx -d "${DOMAIN_NAME}"
+                
+                echo -e "${GREEN}>>> HTTPS 配置完成！${NC}"
+            fi
+        else
+            echo -e "${RED}>>> Nginx 配置检测失败，请检查 /etc/nginx/conf.d/emby.conf${NC}"
+        fi
+    else
+        echo -e "已跳过 Nginx 配置。"
+    fi
+}
+
+# --- 最终信息展示 ---
 show_final_info() {
     local scheme_name="$1"
     
@@ -144,43 +195,29 @@ show_final_info() {
     echo -e "${GREEN}########################################################${NC}"
     echo -e ""
     
-    # 1. CloudDrive2 (仅方案A)
     if [ "$scheme_name" == "方案A" ]; then
         echo -e "${YELLOW}1. 配置网盘 (CloudDrive2)${NC}"
-        echo -e "   -----------------------------------------------------"
         echo -e "   访问地址:  http://${HOST_IP}:${CD2_PORT}"
-        echo -e "   操作指南:  登录网盘 -> ${RED}必须将网盘挂载到 /CloudNAS 目录${NC}"
+        echo -e "   ${RED}>>> 务必去 CD2 后台将网盘挂载到 /CloudNAS${NC}"
         echo -e ""
     fi
 
-    # 2. Alist (仅方案B)
     if [ "$scheme_name" == "方案B" ]; then
         echo -e "${YELLOW}1. 配置网盘 (Alist)${NC}"
-        echo -e "   -----------------------------------------------------"
         echo -e "   访问地址:  http://${HOST_IP}:${ALIST_PORT}"
-        echo -e "   操作指南:  添加网盘 -> 获取 WebDAV 信息 -> 配置 Rclone"
+        echo -e "   操作: 添加网盘 -> 获取 WebDAV -> Rclone 挂载"
         echo -e ""
     fi
 
-    # 3. Emby Server (通用)
     echo -e "${YELLOW}2. 访问影音服 (Emby Server)${NC}"
-    echo -e "   -----------------------------------------------------"
     if [ -n "$DOMAIN_NAME" ]; then
-        echo -e "   ${CYAN}域名访问:  http://${DOMAIN_NAME} (需自行配置Nginx)${NC}"
+        echo -e "   ${CYAN}域名访问:  https://${DOMAIN_NAME} (或 http)${NC}"
+    else
         echo -e "   IP访问:    http://${HOST_IP}:${EMBY_PORT}"
-    else
-        echo -e "   访问地址:  http://${HOST_IP}:${EMBY_PORT}"
     fi
-    echo -e "   -----------------------------------------------------"
-    echo -e "   ${BLUE}媒体库设置路径:${NC}"
-    if [ "$scheme_name" == "方案A" ]; then
-        echo -e "   /mnt/media/[你的网盘名称]"
-    else
-        echo -e "   /mnt/media (对应你的 Rclone 挂载点)"
-    fi
+    echo -e "   媒体库路径: /mnt/media/[你的网盘名称]"
     echo -e ""
     echo -e "${GREEN}########################################################${NC}"
-    echo -e "Enjoy your private theater! 🎬"
 }
 
 # --- 方案 A: CloudDrive2 ---
@@ -197,7 +234,7 @@ install_scheme_a() {
     docker run -d --name clouddrive2 --restart unless-stopped --privileged --device /dev/fuse:/dev/fuse -v "$WORK_DIR/clouddrive2/mount":/CloudNAS:shared -v "$WORK_DIR/clouddrive2/config":/Config -p ${CD2_PORT}:19798 cloudnas/clouddrive2
     docker run -d --name emby --restart unless-stopped --net=host --privileged -e UID=0 -e GID=0 -v "$WORK_DIR/emby/config":/config -v "$WORK_DIR/clouddrive2/mount":/mnt/media:shared emby/embyserver:latest
 
-    ask_domain_binding
+    configure_nginx_automation
     show_final_info "方案A"
 }
 
@@ -215,7 +252,7 @@ install_scheme_b() {
     docker run -d --restart=always -v "$WORK_DIR/alist":/opt/alist/data -p ${ALIST_PORT}:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="alist" xhofe/alist:latest
     docker run -d --name emby --restart unless-stopped --net=host --privileged -e UID=0 -e GID=0 -v "$WORK_DIR/emby/config":/config -v "$WORK_DIR/rclone_mount":/mnt/media:shared emby/embyserver:latest
 
-    ask_domain_binding
+    configure_nginx_automation
     show_final_info "方案B"
 }
 
@@ -223,22 +260,22 @@ install_scheme_b() {
 show_menu() {
     clear
     echo -e "${CYAN}################################################${NC}"
-    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (CN版 v2.0)  #${NC}"
-    echo -e "${CYAN}#     支持: CentOS / Ubuntu / Debian           #${NC}"
+    echo -e "${CYAN}#     Emby 全能影音库一键构建脚本 (CN版 v3.0)  #${NC}"
+    echo -e "${CYAN}#     新增: 自动化 Nginx 反代 + SSL 证书配置   #${NC}"
     echo -e "${CYAN}################################################${NC}"
     echo -e ""
     echo -e "请选择部署方案:"
     echo -e "------------------------------------------------"
     echo -e "${GREEN}1. 方案 A: CloudDrive2 + Emby${NC}"
-    echo -e "   (新手推荐: 阿里云盘/115/夸克/123盘)"
+    echo -e "   (推荐: 阿里云盘/115/夸克 - 含 Nginx 自动配置)"
     echo -e ""
     echo -e "${YELLOW}2. 方案 B: Alist + Emby${NC}"
-    echo -e "   (进阶玩家: 追求极致速度/直链播放)"
+    echo -e "   (推荐: Google Drive/直链播放 - 含 Nginx 自动配置)"
     echo -e ""
     echo -e "------------------------------------------------"
     echo -e "实用工具箱:"
     echo -e "3. 修复 TMDB Hosts"
-    echo -e "4. 安装 Rclone"
+    echo -e "4. 单独安装/配置 Nginx + SSL"
     echo -e "5. 卸载并清理"
     echo -e "0. 退出"
     echo -e "------------------------------------------------"
@@ -248,10 +285,12 @@ show_menu() {
         1) check_root; install_scheme_a; fix_tmdb_hosts ;;
         2) check_root; install_scheme_b; fix_tmdb_hosts; install_rclone ;;
         3) check_root; fix_tmdb_hosts ;;
-        4) install_rclone ;;
+        4) check_root; install_base_dependencies; configure_nginx_automation ;;
         5)
             echo -e "${RED}正在清理...${NC}"
             docker rm -f clouddrive2 alist emby &> /dev/null
+            # 停止 nginx 以防万一
+            systemctl stop nginx &> /dev/null
             read -p "删除配置文件? (y/n): " del_conf
             if [ "$del_conf" == "y" ]; then rm -rf "$WORK_DIR"; fi
             echo "完成。"
